@@ -6,14 +6,18 @@ import {
 
 
 const client = new Anthropic({
-  apiKey:
-    process.env.ANTHROPIC_API_KEY,
+  apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
 
 /**
  * ------------------------------------------------
- * ASK CLAUDE WITH SESSION HISTORY
+ * ASK CLAUDE WITH:
+ *
+ * - conversation history
+ * - reply context
+ * - web search
+ * - session continuity
  * ------------------------------------------------
  */
 export async function askClaude({
@@ -34,20 +38,26 @@ export async function askClaude({
   }
 
 
+  /**
+   * Remove bot mention syntax and internal
+   * Cliq mention tokens.
+   */
   const cleanMessage =
     cleanUserMessage(message);
 
 
   /**
-   * Convert stored DB messages into
+   * Convert PostgreSQL history into
    * Anthropic message format.
    */
   const claudeHistory =
-    convertHistoryToClaudeMessages(history);
+    convertHistoryToClaudeMessages(
+      history
+    );
 
 
   /**
-   * Current user request.
+   * Current request content.
    */
   const currentContent = `
 USER:
@@ -56,7 +66,7 @@ ${userName}
 CONVERSATION:
 ${channelName}
 
-ADDITIONAL CONTEXT:
+ADDITIONAL CLIQ CONTEXT:
 ${context}
 
 CURRENT REQUEST:
@@ -64,6 +74,9 @@ ${cleanMessage}
   `.trim();
 
 
+  /**
+   * Build complete Claude conversation.
+   */
   const messages = [
     ...claudeHistory,
 
@@ -79,8 +92,7 @@ ${cleanMessage}
   );
 
   console.log(
-    "CLAUDE SESSION MESSAGE COUNT:",
-    messages.length
+    "CLAUDE REQUEST"
   );
 
   console.log(
@@ -88,6 +100,26 @@ ${cleanMessage}
   );
 
 
+  console.log(
+    "Message count:",
+    messages.length
+  );
+
+
+  console.log(
+    "Current request:",
+    cleanMessage
+  );
+
+
+  /**
+   * ------------------------------------------------
+   * CLAUDE API CALL
+   *
+   * Web search is available to Claude,
+   * but Claude decides whether it needs it.
+   * ------------------------------------------------
+   */
   const response =
     await client.messages.create({
 
@@ -100,37 +132,75 @@ ${cleanMessage}
       system:
         SYSTEM_PROMPT,
 
+      tools: [
+        {
+          type:
+            "web_search_20250305",
+
+          name:
+            "web_search",
+
+          max_uses:
+            5,
+        },
+      ],
+
       messages,
     });
 
 
+  /**
+   * Log stop reason.
+   */
+  console.log(
+    "Claude stop reason:",
+    response.stop_reason
+  );
+
+
+  /**
+   * Log all returned content block types.
+   *
+   * Useful because web-search responses may
+   * contain more than plain text blocks.
+   */
+  console.log(
+    "Response content types:",
+    response.content.map(
+      (block) => block.type
+    )
+  );
+
+
+  /**
+   * Extract final readable text.
+   */
   const text =
-    response.content
-
-      .filter(
-        (block) =>
-          block.type === "text"
-      )
-
-      .map(
-        (block) =>
-          block.text
-      )
-
-      .join("\n")
-
-      .trim();
+    extractClaudeText(
+      response.content
+    );
 
 
   if (!text) {
 
+    console.error(
+      "Claude raw response:",
+      JSON.stringify(
+        response,
+        null,
+        2
+      )
+    );
+
+
     throw new Error(
-      "Claude returned no text response."
+      "Claude returned no readable text response."
     );
   }
 
 
   return {
+
     text,
 
     usage:
@@ -141,14 +211,30 @@ ${cleanMessage}
 
     stopReason:
       response.stop_reason,
+
+    /**
+     * Indicates whether web search appeared
+     * in the returned content blocks.
+     */
+    webSearchUsed:
+      detectWebSearchUsage(
+        response.content
+      ),
   };
 }
 
 
 /**
  * ------------------------------------------------
- * CONVERT DATABASE HISTORY
+ * CONVERT SESSION HISTORY
  * ------------------------------------------------
+ *
+ * PostgreSQL messages:
+ *
+ * user
+ * assistant
+ *
+ * become Anthropic Messages API messages.
  */
 function convertHistoryToClaudeMessages(
   history
@@ -167,9 +253,6 @@ function convertHistoryToClaudeMessages(
     }
 
 
-    /**
-     * Anthropic expects user/assistant roles.
-     */
     const role =
       item.role === "assistant"
         ? "assistant"
@@ -177,11 +260,14 @@ function convertHistoryToClaudeMessages(
 
 
     let content =
-      item.message_text;
+      String(item.message_text);
 
 
     /**
-     * Preserve teammate identity in shared sessions.
+     * Shared channel sessions may contain
+     * multiple human participants.
+     *
+     * Preserve speaker identity.
      */
     if (
       role === "user" &&
@@ -193,15 +279,16 @@ function convertHistoryToClaudeMessages(
     }
 
 
+    const previous =
+      messages[
+        messages.length - 1
+      ];
+
+
     /**
-     * Anthropic requires alternating conversational
-     * structure. Merge consecutive messages with
+     * Merge consecutive messages with
      * the same role.
      */
-    const previous =
-      messages[messages.length - 1];
-
-
     if (
       previous &&
       previous.role === role
@@ -225,27 +312,124 @@ function convertHistoryToClaudeMessages(
 
 
 /**
- * Remove Cliq mention syntax.
+ * ------------------------------------------------
+ * EXTRACT READABLE CLAUDE TEXT
+ * ------------------------------------------------
  */
-function cleanUserMessage(message) {
+function extractClaudeText(
+  contentBlocks
+) {
+
+  if (
+    !Array.isArray(contentBlocks)
+  ) {
+    return "";
+  }
+
+
+  const texts = [];
+
+
+  for (
+    const block of contentBlocks
+  ) {
+
+    if (
+      block.type === "text" &&
+      block.text
+    ) {
+
+      texts.push(
+        block.text
+      );
+    }
+  }
+
+
+  return texts
+    .join("\n\n")
+    .trim();
+}
+
+
+/**
+ * ------------------------------------------------
+ * DETECT WEB SEARCH USAGE
+ * ------------------------------------------------
+ */
+function detectWebSearchUsage(
+  contentBlocks
+) {
+
+  if (
+    !Array.isArray(contentBlocks)
+  ) {
+    return false;
+  }
+
+
+  return contentBlocks.some(
+    (block) => {
+
+      return (
+        block.type ===
+          "server_tool_use" ||
+
+        block.type ===
+          "web_search_tool_result"
+      );
+    }
+  );
+}
+
+
+/**
+ * ------------------------------------------------
+ * CLEAN USER MESSAGE
+ * ------------------------------------------------
+ */
+function cleanUserMessage(
+  message
+) {
 
   return String(message)
 
+    /**
+     * XML-like mention.
+     */
     .replace(
       /<@[^>]+>/g,
       " "
     )
 
+    /**
+     * Visible mention.
+     */
     .replace(
       /@Claude\b/gi,
       " "
     )
 
+    /**
+     * Cliq internal bot mention syntax:
+     * {@b-123456}
+     */
+    .replace(
+      /\{@b-[^}]+\}/g,
+      " "
+    )
+
+    /**
+     * Plain bot ID.
+     */
     .replace(
       /\bb-[0-9]+\b/g,
       " "
     )
 
+    /**
+     * Normalize whitespace.
+     */
     .replace(
       /\s+/g,
       " "

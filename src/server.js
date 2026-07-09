@@ -403,6 +403,9 @@ app.post(
           stop_reason:
             result.stopReason,
 
+            web_search_used:
+         result.webSearchUsed,
+
           usage:
             result.usage,
         },
