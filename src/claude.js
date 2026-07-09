@@ -1,10 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 
 import { SYSTEM_PROMPT } from "./prompts.js";
-
-import {
-  buildCliqContext,
-} from "./context.js";
+import { buildCliqContext } from "./context.js";
 
 
 const client = new Anthropic({
@@ -12,9 +9,6 @@ const client = new Anthropic({
 });
 
 
-/**
- * Ask Claude
- */
 export async function askClaude({
   message,
   userName = "Team member",
@@ -22,62 +16,77 @@ export async function askClaude({
   messageDetails = null,
   attachments = null,
 }) {
-
-  if (!message || !message.trim()) {
-    throw new Error(
-      "Message is required."
-    );
+  if (!message || !String(message).trim()) {
+    throw new Error("Message is required.");
   }
 
 
   /**
-   * Build useful Cliq context
+   * Remove Cliq mention syntax before sending
+   * the user's actual instruction to Claude.
    */
+  const cleanMessage = cleanUserMessage(message);
+
+
   const context = buildCliqContext({
     messageDetails,
     attachments,
   });
 
 
-  /**
-   * Construct user prompt
-   */
   const prompt = `
 You are responding inside Zoho Cliq.
 
-User:
+USER:
 ${userName}
 
-Conversation:
+CONVERSATION:
 ${channelName}
 
+CONTEXT:
 ${context}
 
-Current user request:
-${message}
+CURRENT USER REQUEST:
+${cleanMessage}
 
-Instructions:
+INTERPRETATION RULES:
 
-- Answer the current request directly.
-- Use previous/replied-message context when it is relevant.
-- When the user says things like "this", "that", "above", or "previous message",
-  inspect the supplied Cliq context before saying context is missing.
-- Do not say that no context was provided when a replied message is available.
-- Do not claim you opened files, links, systems, databases, or applications
-  unless their actual contents were provided to you.
-- If context is incomplete, explain exactly what information is missing.
+1. Answer the user's actual request directly.
+
+2. When a replied-to message is provided and the user says:
+   - this
+   - that
+   - it
+   - above
+   - previous message
+   - what is this
+   - explain this
+
+   assume the user is referring to the replied-to message.
+
+3. Do not interpret bot mentions, mention IDs, user IDs,
+   or internal Cliq identifiers as the subject of the question.
+
+4. The bot mention is only a way of invoking you.
+   It is not normally part of the user's semantic question.
+
+5. Use the replied-to message as primary context when present.
+
+6. Do not claim access to systems, files, tools, databases,
+   or external links unless their actual contents were supplied.
+
+7. Give a useful direct answer instead of asking for context
+   when sufficient reply context is already available.
 `.trim();
 
 
   console.log("\n======================================");
   console.log("PROMPT SENT TO CLAUDE");
   console.log("======================================");
+
   console.log(prompt);
 
 
-  /**
-   * Claude API call
-   */
   const response = await client.messages.create({
     model: "claude-sonnet-5",
 
@@ -94,37 +103,44 @@ Instructions:
   });
 
 
-  /**
-   * Extract text response
-   */
-  const textBlocks = response.content.filter(
-    (block) => block.type === "text"
-  );
-
-
-  const text = textBlocks
+  const text = response.content
+    .filter((block) => block.type === "text")
     .map((block) => block.text)
     .join("\n")
     .trim();
 
 
   if (!text) {
-    throw new Error(
-      "Claude returned no text response."
-    );
+    throw new Error("Claude returned no text response.");
   }
 
 
   return {
     text,
-
-    usage:
-      response.usage,
-
-    model:
-      response.model,
-
-    stopReason:
-      response.stop_reason,
+    usage: response.usage,
+    model: response.model,
+    stopReason: response.stop_reason,
   };
+}
+
+
+/**
+ * Remove common Zoho Cliq mention representations.
+ */
+function cleanUserMessage(message) {
+  return String(message)
+
+    // XML-style mention representations
+    .replace(/<@[^>]+>/g, " ")
+
+    // Visible mention
+    .replace(/@Claude\b/gi, " ")
+
+    // Possible bot/user internal token patterns
+    .replace(/\bb-[0-9]+\b/g, " ")
+
+    // Clean spaces
+    .replace(/\s+/g, " ")
+
+    .trim();
 }

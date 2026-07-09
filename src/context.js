@@ -1,207 +1,162 @@
 /**
- * Convert Zoho Cliq message_details
- * into useful text context for Claude.
- *
- * For now this is deliberately flexible because
- * Zoho Cliq payload structures may differ depending
- * on message type and handler.
+ * Build clean context from Zoho Cliq message_details.
  */
-
 
 export function buildCliqContext({
   messageDetails = null,
   attachments = null,
 }) {
-
   const sections = [];
 
+  const repliedMessage = extractReplyText(messageDetails);
 
-  /**
-   * ---------------------------------------------
-   * MESSAGE DETAILS
-   * ---------------------------------------------
-   */
-  if (
-    messageDetails &&
-    typeof messageDetails === "object"
-  ) {
+  if (repliedMessage) {
+    sections.push(`
+REPLIED-TO MESSAGE:
 
-    const extractedTexts =
-      extractTextValues(messageDetails);
+${repliedMessage}
 
-
-    if (extractedTexts.length > 0) {
-
-      sections.push(`
-Relevant message or reply context:
-
-${extractedTexts
-  .map((text, index) => `${index + 1}. ${text}`)
-  .join("\n")}
-      `.trim());
-
-    } else {
-
-      /**
-       * Debug fallback
-       *
-       * Until we know Cliq's exact returned structure,
-       * give Claude the JSON.
-       */
-      sections.push(`
-Additional Cliq message metadata:
-
-${JSON.stringify(messageDetails, null, 2)}
-      `.trim());
-    }
+IMPORTANT:
+The user's current message is a reply to the message above.
+When the user says "this", "that", "it", "above", or similar references,
+assume they are referring to the replied-to message unless the wording
+clearly indicates otherwise.
+    `.trim());
   }
 
-
-  /**
-   * ---------------------------------------------
-   * ATTACHMENTS
-   * ---------------------------------------------
-   */
   if (
     attachments &&
     Array.isArray(attachments) &&
     attachments.length > 0
   ) {
-
-    const attachmentInformation =
-      attachments.map((attachment, index) => {
-
-        return `${index + 1}. ${JSON.stringify(attachment)}`;
-
-      }).join("\n");
-
-
     sections.push(`
-Attachment metadata supplied by Cliq:
+ATTACHMENT METADATA:
 
-${attachmentInformation}
+${JSON.stringify(attachments, null, 2)}
 
-Important:
-The existence of attachment metadata does not mean
-the actual file contents have been read.
+The metadata above does not mean the actual attachment content has been read.
     `.trim());
   }
 
-
-  /**
-   * Nothing available
-   */
   if (sections.length === 0) {
-
     return `
-No previous-message, reply, or attachment context was supplied with this request.
+No replied-message context or attachment content was provided.
     `.trim();
   }
-
 
   return sections.join("\n\n");
 }
 
 
 /**
- * ------------------------------------------------
- * RECURSIVELY FIND MESSAGE-LIKE TEXT
- * ------------------------------------------------
- *
- * We avoid collecting every string such as:
- *
- * IDs
- * email addresses
- * names
- * URLs
- * timestamps
- *
- * and prioritize keys commonly associated with
- * message content.
+ * Find the actual replied-to message.
  */
-function extractTextValues(object) {
+function extractReplyText(messageDetails) {
+  if (!messageDetails || typeof messageDetails !== "object") {
+    return null;
+  }
 
-  const results = [];
+  const possiblePaths = [
+    messageDetails?.reply?.text,
+    messageDetails?.reply?.message,
+    messageDetails?.reply?.content,
 
-  const interestingKeys = new Set([
-    "text",
-    "message",
-    "content",
-    "original_message",
-    "parent_message",
-    "reply_message",
-    "reply_text",
-    "title",
-    "description",
-  ]);
+    messageDetails?.parent?.text,
+    messageDetails?.parent?.message,
+    messageDetails?.parent?.content,
 
+    messageDetails?.original_message?.text,
+    messageDetails?.original_message?.message,
 
-  function walk(value, keyName = "") {
+    messageDetails?.reply_message?.text,
+    messageDetails?.reply_message?.message,
 
-    if (value === null || value === undefined) {
-      return;
-    }
+    messageDetails?.parent_message?.text,
+    messageDetails?.parent_message?.message,
 
+    messageDetails?.text,
+    messageDetails?.message,
+    messageDetails?.content,
+  ];
 
-    /**
-     * String value
-     */
-    if (typeof value === "string") {
-
-      const cleanValue =
-        value.trim();
-
-
-      if (
-        cleanValue.length > 0 &&
-        interestingKeys.has(
-          keyName.toLowerCase()
-        )
-      ) {
-
-        results.push(cleanValue);
-      }
-
-      return;
-    }
-
-
-    /**
-     * Array
-     */
-    if (Array.isArray(value)) {
-
-      for (const item of value) {
-        walk(item, keyName);
-      }
-
-      return;
-    }
-
-
-    /**
-     * Object
-     */
-    if (typeof value === "object") {
-
-      for (const [key, childValue] of Object.entries(value)) {
-
-        walk(
-          childValue,
-          key
-        );
-      }
+  for (const value of possiblePaths) {
+    if (
+      typeof value === "string" &&
+      value.trim().length > 0
+    ) {
+      return cleanText(value);
     }
   }
 
+  // Recursive fallback.
+  return findBestMessageText(messageDetails);
+}
 
-  walk(object);
+
+function findBestMessageText(value) {
+  const candidates = [];
+
+  function walk(current, key = "") {
+    if (current === null || current === undefined) {
+      return;
+    }
+
+    if (typeof current === "string") {
+      const cleaned = cleanText(current);
+
+      const messageKeys = new Set([
+        "text",
+        "message",
+        "content",
+        "reply_text",
+        "parent_message",
+        "original_message",
+      ]);
+
+      if (
+        messageKeys.has(key.toLowerCase()) &&
+        cleaned.length > 10 &&
+        !looksLikeId(cleaned)
+      ) {
+        candidates.push(cleaned);
+      }
+
+      return;
+    }
+
+    if (Array.isArray(current)) {
+      current.forEach((item) => walk(item, key));
+      return;
+    }
+
+    if (typeof current === "object") {
+      Object.entries(current).forEach(([childKey, childValue]) => {
+        walk(childValue, childKey);
+      });
+    }
+  }
+
+  walk(value);
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  // Prefer meaningful longer message content.
+  candidates.sort((a, b) => b.length - a.length);
+
+  return candidates[0];
+}
 
 
-  /**
-   * Remove duplicate texts
-   */
-  return [
-    ...new Set(results)
-  ];
+function cleanText(text) {
+  return String(text)
+    .replace(/<@[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+function looksLikeId(text) {
+  return /^[a-zA-Z0-9_\-.:]+$/.test(text) && text.length < 100;
 }
