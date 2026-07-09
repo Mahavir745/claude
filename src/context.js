@@ -1,7 +1,6 @@
 /**
- * Build clean context from Zoho Cliq message_details.
+ * Build useful context from Zoho Cliq data.
  */
-
 export function buildCliqContext({
   messageDetails = null,
   attachments = null,
@@ -11,36 +10,45 @@ export function buildCliqContext({
   const repliedMessage = extractReplyText(messageDetails);
 
   if (repliedMessage) {
-    sections.push(`
+    sections.push(
+      `
 REPLIED-TO MESSAGE:
 
 ${repliedMessage}
 
-IMPORTANT:
 The user's current message is a reply to the message above.
-When the user says "this", "that", "it", "above", or similar references,
-assume they are referring to the replied-to message unless the wording
-clearly indicates otherwise.
-    `.trim());
+
+When the user says:
+"this",
+"that",
+"it",
+"above",
+or similar wording,
+
+the replied-to message is normally the primary reference.
+      `.trim()
+    );
   }
 
   if (
-    attachments &&
     Array.isArray(attachments) &&
     attachments.length > 0
   ) {
-    sections.push(`
+    sections.push(
+      `
 ATTACHMENT METADATA:
 
 ${JSON.stringify(attachments, null, 2)}
 
-The metadata above does not mean the actual attachment content has been read.
-    `.trim());
+Important:
+Attachment metadata does not mean the actual file contents were read.
+      `.trim()
+    );
   }
 
   if (sections.length === 0) {
     return `
-No replied-message context or attachment content was provided.
+No separate replied-message or attachment context was supplied.
     `.trim();
   }
 
@@ -49,10 +57,92 @@ No replied-message context or attachment content was provided.
 
 
 /**
- * Find the actual replied-to message.
+ * Extract thread/message identifiers from Cliq payload.
+ */
+export function extractConversationIdentifiers({
+  threadId = null,
+  rootMessageId = null,
+  messageId = null,
+  messageDetails = null,
+}) {
+  const detectedThreadId =
+    threadId ||
+    findValueByKeys(messageDetails, [
+      "thread_id",
+      "threadId",
+    ]);
+
+  const detectedRootMessageId =
+    rootMessageId ||
+    findValueByKeys(messageDetails, [
+      "root_message_id",
+      "rootMessageId",
+      "parent_message_id",
+      "parentMessageId",
+      "reply_to_message_id",
+    ]);
+
+  const detectedMessageId =
+    messageId ||
+    findValueByKeys(messageDetails, [
+      "message_id",
+      "messageId",
+      "id",
+    ]);
+
+  return {
+    threadId: cleanIdentifier(detectedThreadId),
+
+    rootMessageId: cleanIdentifier(
+      detectedRootMessageId
+    ),
+
+    messageId: cleanIdentifier(
+      detectedMessageId
+    ),
+  };
+}
+
+
+/**
+ * Build a persistent session key.
+ */
+export function buildSessionKey({
+  threadId,
+  rootMessageId,
+  messageId,
+  chatId,
+}) {
+  if (threadId) {
+    return `thread:${threadId}`;
+  }
+
+  if (rootMessageId) {
+    return `thread:${rootMessageId}`;
+  }
+
+  if (messageId) {
+    return `message:${messageId}`;
+  }
+
+  if (chatId) {
+    return `chat:${chatId}`;
+  }
+
+  throw new Error(
+    "Unable to determine conversation session key."
+  );
+}
+
+
+/**
+ * Extract replied-message text.
  */
 function extractReplyText(messageDetails) {
-  if (!messageDetails || typeof messageDetails !== "object") {
+  if (
+    !messageDetails ||
+    typeof messageDetails !== "object"
+  ) {
     return null;
   }
 
@@ -82,39 +172,46 @@ function extractReplyText(messageDetails) {
   for (const value of possiblePaths) {
     if (
       typeof value === "string" &&
-      value.trim().length > 0
+      value.trim()
     ) {
       return cleanText(value);
     }
   }
 
-  // Recursive fallback.
   return findBestMessageText(messageDetails);
 }
 
 
+/**
+ * Recursively search for useful message text.
+ */
 function findBestMessageText(value) {
   const candidates = [];
 
+  const interestingKeys = new Set([
+    "text",
+    "message",
+    "content",
+    "reply_text",
+    "parent_message",
+    "original_message",
+  ]);
+
   function walk(current, key = "") {
-    if (current === null || current === undefined) {
+    if (
+      current === null ||
+      current === undefined
+    ) {
       return;
     }
 
     if (typeof current === "string") {
       const cleaned = cleanText(current);
 
-      const messageKeys = new Set([
-        "text",
-        "message",
-        "content",
-        "reply_text",
-        "parent_message",
-        "original_message",
-      ]);
-
       if (
-        messageKeys.has(key.toLowerCase()) &&
+        interestingKeys.has(
+          key.toLowerCase()
+        ) &&
         cleaned.length > 10 &&
         !looksLikeId(cleaned)
       ) {
@@ -125,14 +222,19 @@ function findBestMessageText(value) {
     }
 
     if (Array.isArray(current)) {
-      current.forEach((item) => walk(item, key));
+      current.forEach((item) => {
+        walk(item, key);
+      });
+
       return;
     }
 
     if (typeof current === "object") {
-      Object.entries(current).forEach(([childKey, childValue]) => {
-        walk(childValue, childKey);
-      });
+      Object.entries(current).forEach(
+        ([childKey, childValue]) => {
+          walk(childValue, childKey);
+        }
+      );
     }
   }
 
@@ -142,13 +244,57 @@ function findBestMessageText(value) {
     return null;
   }
 
-  // Prefer meaningful longer message content.
-  candidates.sort((a, b) => b.length - a.length);
+  candidates.sort(
+    (a, b) => b.length - a.length
+  );
 
   return candidates[0];
 }
 
 
+/**
+ * Recursively find a value by possible key names.
+ */
+function findValueByKeys(object, keys) {
+  if (
+    !object ||
+    typeof object !== "object"
+  ) {
+    return null;
+  }
+
+  for (const key of keys) {
+    if (
+      object[key] !== undefined &&
+      object[key] !== null
+    ) {
+      return object[key];
+    }
+  }
+
+  for (const value of Object.values(object)) {
+    if (
+      value &&
+      typeof value === "object"
+    ) {
+      const found = findValueByKeys(
+        value,
+        keys
+      );
+
+      if (found !== null) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+}
+
+
+/**
+ * Clean visible message text.
+ */
 function cleanText(text) {
   return String(text)
     .replace(/<@[^>]+>/g, "")
@@ -157,6 +303,34 @@ function cleanText(text) {
 }
 
 
+/**
+ * Convert ID-like values to string.
+ */
+function cleanIdentifier(value) {
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return null;
+  }
+
+  if (
+    typeof value === "string" ||
+    typeof value === "number"
+  ) {
+    return String(value);
+  }
+
+  return null;
+}
+
+
+/**
+ * Check whether a string looks like an internal ID.
+ */
 function looksLikeId(text) {
-  return /^[a-zA-Z0-9_\-.:]+$/.test(text) && text.length < 100;
+  return (
+    /^[a-zA-Z0-9_\-.:]+$/.test(text) &&
+    text.length < 100
+  );
 }

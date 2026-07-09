@@ -1,146 +1,255 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-import { SYSTEM_PROMPT } from "./prompts.js";
-import { buildCliqContext } from "./context.js";
+import {
+  SYSTEM_PROMPT,
+} from "./prompts.js";
 
 
 const client = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
+  apiKey:
+    process.env.ANTHROPIC_API_KEY,
 });
 
 
+/**
+ * ------------------------------------------------
+ * ASK CLAUDE WITH SESSION HISTORY
+ * ------------------------------------------------
+ */
 export async function askClaude({
   message,
+  history = [],
   userName = "Team member",
   channelName = "Unknown conversation",
-  messageDetails = null,
-  attachments = null,
+  context = "",
 }) {
-  if (!message || !String(message).trim()) {
-    throw new Error("Message is required.");
+
+  if (
+    !message ||
+    !String(message).trim()
+  ) {
+    throw new Error(
+      "Message is required."
+    );
   }
 
 
+  const cleanMessage =
+    cleanUserMessage(message);
+
+
   /**
-   * Remove Cliq mention syntax before sending
-   * the user's actual instruction to Claude.
+   * Convert stored DB messages into
+   * Anthropic message format.
    */
-  const cleanMessage = cleanUserMessage(message);
+  const claudeHistory =
+    convertHistoryToClaudeMessages(history);
 
 
-  const context = buildCliqContext({
-    messageDetails,
-    attachments,
-  });
-
-
-  const prompt = `
-You are responding inside Zoho Cliq.
-
+  /**
+   * Current user request.
+   */
+  const currentContent = `
 USER:
 ${userName}
 
 CONVERSATION:
 ${channelName}
 
-CONTEXT:
+ADDITIONAL CONTEXT:
 ${context}
 
-CURRENT USER REQUEST:
+CURRENT REQUEST:
 ${cleanMessage}
-
-INTERPRETATION RULES:
-
-1. Answer the user's actual request directly.
-
-2. When a replied-to message is provided and the user says:
-   - this
-   - that
-   - it
-   - above
-   - previous message
-   - what is this
-   - explain this
-
-   assume the user is referring to the replied-to message.
-
-3. Do not interpret bot mentions, mention IDs, user IDs,
-   or internal Cliq identifiers as the subject of the question.
-
-4. The bot mention is only a way of invoking you.
-   It is not normally part of the user's semantic question.
-
-5. Use the replied-to message as primary context when present.
-
-6. Do not claim access to systems, files, tools, databases,
-   or external links unless their actual contents were supplied.
-
-7. Give a useful direct answer instead of asking for context
-   when sufficient reply context is already available.
-`.trim();
+  `.trim();
 
 
-  console.log("\n======================================");
-  console.log("PROMPT SENT TO CLAUDE");
-  console.log("======================================");
+  const messages = [
+    ...claudeHistory,
 
-  console.log(prompt);
-
-
-  const response = await client.messages.create({
-    model: "claude-sonnet-5",
-
-    max_tokens: 4000,
-
-    system: SYSTEM_PROMPT,
-
-    messages: [
-      {
-        role: "user",
-        content: prompt,
-      },
-    ],
-  });
+    {
+      role: "user",
+      content: currentContent,
+    },
+  ];
 
 
-  const text = response.content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
+  console.log(
+    "\n======================================"
+  );
+
+  console.log(
+    "CLAUDE SESSION MESSAGE COUNT:",
+    messages.length
+  );
+
+  console.log(
+    "======================================"
+  );
+
+
+  const response =
+    await client.messages.create({
+
+      model:
+        "claude-sonnet-5",
+
+      max_tokens:
+        4000,
+
+      system:
+        SYSTEM_PROMPT,
+
+      messages,
+    });
+
+
+  const text =
+    response.content
+
+      .filter(
+        (block) =>
+          block.type === "text"
+      )
+
+      .map(
+        (block) =>
+          block.text
+      )
+
+      .join("\n")
+
+      .trim();
 
 
   if (!text) {
-    throw new Error("Claude returned no text response.");
+
+    throw new Error(
+      "Claude returned no text response."
+    );
   }
 
 
   return {
     text,
-    usage: response.usage,
-    model: response.model,
-    stopReason: response.stop_reason,
+
+    usage:
+      response.usage,
+
+    model:
+      response.model,
+
+    stopReason:
+      response.stop_reason,
   };
 }
 
 
 /**
- * Remove common Zoho Cliq mention representations.
+ * ------------------------------------------------
+ * CONVERT DATABASE HISTORY
+ * ------------------------------------------------
+ */
+function convertHistoryToClaudeMessages(
+  history
+) {
+
+  const messages = [];
+
+
+  for (const item of history) {
+
+    if (
+      !item.message_text ||
+      !item.role
+    ) {
+      continue;
+    }
+
+
+    /**
+     * Anthropic expects user/assistant roles.
+     */
+    const role =
+      item.role === "assistant"
+        ? "assistant"
+        : "user";
+
+
+    let content =
+      item.message_text;
+
+
+    /**
+     * Preserve teammate identity in shared sessions.
+     */
+    if (
+      role === "user" &&
+      item.user_name
+    ) {
+
+      content =
+        `${item.user_name}: ${content}`;
+    }
+
+
+    /**
+     * Anthropic requires alternating conversational
+     * structure. Merge consecutive messages with
+     * the same role.
+     */
+    const previous =
+      messages[messages.length - 1];
+
+
+    if (
+      previous &&
+      previous.role === role
+    ) {
+
+      previous.content +=
+        `\n\n${content}`;
+
+    } else {
+
+      messages.push({
+        role,
+        content,
+      });
+    }
+  }
+
+
+  return messages;
+}
+
+
+/**
+ * Remove Cliq mention syntax.
  */
 function cleanUserMessage(message) {
+
   return String(message)
 
-    // XML-style mention representations
-    .replace(/<@[^>]+>/g, " ")
+    .replace(
+      /<@[^>]+>/g,
+      " "
+    )
 
-    // Visible mention
-    .replace(/@Claude\b/gi, " ")
+    .replace(
+      /@Claude\b/gi,
+      " "
+    )
 
-    // Possible bot/user internal token patterns
-    .replace(/\bb-[0-9]+\b/g, " ")
+    .replace(
+      /\bb-[0-9]+\b/g,
+      " "
+    )
 
-    // Clean spaces
-    .replace(/\s+/g, " ")
+    .replace(
+      /\s+/g,
+      " "
+    )
 
     .trim();
 }
