@@ -1,40 +1,112 @@
 import "dotenv/config";
 
-import express from "express";
-import cors from "cors";
+
+import express from
+  "express";
+
+
+import cors from
+  "cors";
+
 
 import {
   askClaude,
 } from "./claude.js";
 
+
 import {
   testDatabaseConnection,
+
   initializeDatabase,
 } from "./db.js";
 
-import {
-  getOrCreateSession,
-  addSessionMessage,
-  getSessionMessages,
-} from "./sessions.js";
 
 import {
+
+  getOrCreateSession,
+
+  addSessionMessage,
+
+  getSessionMessages,
+
+} from "./sessions.js";
+
+
+import {
+
   buildCliqContext,
-  extractConversationIdentifiers,
+
   buildSessionKey,
+
 } from "./context.js";
 
 
-const app = express();
+import {
+
+  getAvailableSkills,
+
+  refreshSkillCache,
+
+  getSkillCacheStatus,
+
+} from "./skills.js";
 
 
-app.use(cors());
+const app =
+  express();
+
+
+app.use(
+  cors()
+);
 
 
 app.use(
   express.json({
-    limit: "5mb",
+
+    limit:
+      "5mb",
   })
+);
+
+
+/**
+ * JSON parse error handler.
+ */
+app.use(
+  (
+    error,
+
+    req,
+
+    res,
+
+    next
+  ) => {
+
+    if (
+      error instanceof SyntaxError &&
+      "body" in error
+    ) {
+
+      return res
+        .status(400)
+        .json({
+
+          success:
+            false,
+
+          error:
+            "Invalid JSON body",
+
+          details:
+            error.message,
+        });
+    }
+
+
+    next(error);
+  }
 );
 
 
@@ -43,90 +115,256 @@ app.use(
  * HEALTH
  * ------------------------------------------------
  */
-app.get("/health", async (req, res) => {
+app.get(
 
-  try {
+  "/health",
+
+  (req, res) => {
 
     return res.json({
-      success: true,
-      service: "cliq-claude-agent",
-      database: "configured",
-      status: "running",
+
+      success:
+        true,
+
+      service:
+        "cliq-claude-agent",
+
+      status:
+        "running",
+
       timestamp:
         new Date().toISOString(),
     });
-
-  } catch (error) {
-
-    return res.status(500).json({
-      success: false,
-      error: error.message,
-    });
   }
-});
+);
 
 
 /**
  * ------------------------------------------------
- * DATABASE HEALTH
+ * DB HEALTH
  * ------------------------------------------------
  */
-app.get("/health/db", async (req, res) => {
+app.get(
 
-  try {
+  "/health/db",
 
-    const result =
-      await testDatabaseConnection();
+  async (
+    req,
+    res
+  ) => {
 
+    try {
 
-    return res.json({
-      success: true,
-      database: "connected",
-    });
-
-  } catch (error) {
-
-    console.error(error);
+      const db =
+        await testDatabaseConnection();
 
 
-    return res.status(500).json({
-      success: false,
-      database: "connection failed",
-      error: error.message,
-    });
+      return res.json({
+
+        success:
+          true,
+
+        database:
+          "connected",
+
+        database_time:
+          db.current_time,
+      });
+
+    } catch (error) {
+
+      return res
+        .status(500)
+        .json({
+
+          success:
+            false,
+
+          error:
+            error.message,
+        });
+    }
   }
-});
+);
 
 
 /**
  * ------------------------------------------------
- * CLIQ MENTION
+ * VIEW CURRENT SKILLS
+ * ------------------------------------------------
+ */
+app.get(
+
+  "/api/skills",
+
+  async (
+    req,
+    res
+  ) => {
+
+    try {
+
+      const skills =
+        await getAvailableSkills();
+
+
+      return res.json({
+
+        success:
+          true,
+
+        count:
+          skills.length,
+
+        skills,
+      });
+
+    } catch (error) {
+
+      return res
+        .status(500)
+        .json({
+
+          success:
+            false,
+
+          error:
+            error.message,
+        });
+    }
+  }
+);
+
+
+/**
+ * ------------------------------------------------
+ * FORCE SKILL REFRESH
  * ------------------------------------------------
  */
 app.post(
+
+  "/api/skills/refresh",
+
+  async (
+    req,
+    res
+  ) => {
+
+    try {
+
+      const skills =
+        await refreshSkillCache();
+
+
+      return res.json({
+
+        success:
+          true,
+
+        message:
+          "Skill cache refreshed.",
+
+        count:
+          skills.length,
+
+        skills,
+      });
+
+    } catch (error) {
+
+      return res
+        .status(500)
+        .json({
+
+          success:
+            false,
+
+          error:
+            error.message,
+        });
+    }
+  }
+);
+
+
+/**
+ * ------------------------------------------------
+ * SKILL CACHE STATUS
+ * ------------------------------------------------
+ */
+app.get(
+
+  "/api/skills/cache",
+
+  (
+    req,
+    res
+  ) => {
+
+    return res.json({
+
+      success:
+        true,
+
+      cache:
+        getSkillCacheStatus(),
+    });
+  }
+);
+
+
+/**
+ * ------------------------------------------------
+ * CLIQ ASK ENDPOINT
+ * ------------------------------------------------
+ */
+app.post(
+
   "/api/cliq/mention",
 
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
 
     try {
 
       const {
+
         message,
 
         user_name,
+
         user_id,
+
         user_email,
 
+        user_country,
+
+        user_timezone,
+
         chat_id,
+
         channel_id,
+
         channel_name,
 
-        message_id,
-        thread_id,
-        root_message_id,
+        chat_type,
 
-        message_details,
+        chat_unique_name,
+
+        message_id,
+
+        thread_id,
+
+        reply_text,
+
+        reply_message_id,
+
+        reply_sender_name,
+
         attachments,
+
       } = req.body;
 
 
@@ -139,7 +377,8 @@ app.post(
           .status(400)
           .json({
 
-            success: false,
+            success:
+              false,
 
             error:
               "message is required",
@@ -166,63 +405,28 @@ app.post(
       );
 
 
-      console.log(
-        "Message Details:",
-        JSON.stringify(
-          message_details || null,
-          null,
-          2
-        )
-      );
-
-
       /**
-       * -----------------------------------------
-       * DETECT CONVERSATION IDs
-       * -----------------------------------------
-       */
-      const identifiers =
-        extractConversationIdentifiers({
-
-          threadId:
-            thread_id,
-
-          rootMessageId:
-            root_message_id,
-
-          messageId:
-            message_id,
-
-          messageDetails:
-            message_details,
-        });
-
-
-      console.log(
-        "Conversation IDs:",
-        identifiers
-      );
-
-
-      /**
-       * -----------------------------------------
-       * BUILD SESSION KEY
-       * -----------------------------------------
+       * Session key.
        */
       const sessionKey =
         buildSessionKey({
 
           threadId:
-            identifiers.threadId,
-
-          rootMessageId:
-            identifiers.rootMessageId,
-
-          messageId:
-            identifiers.messageId,
+            thread_id ||
+            null,
 
           chatId:
-            chat_id,
+            chat_id ||
+            null,
+
+          channelId:
+            channel_id ||
+            null,
+
+          userId:
+            user_id ||
+            user_email ||
+            null,
         });
 
 
@@ -233,9 +437,7 @@ app.post(
 
 
       /**
-       * -----------------------------------------
-       * GET OR CREATE SESSION
-       * -----------------------------------------
+       * Get/create session.
        */
       const session =
         await getOrCreateSession({
@@ -243,64 +445,69 @@ app.post(
           sessionKey,
 
           threadId:
-            identifiers.threadId,
+            thread_id ||
+            null,
 
           rootMessageId:
-            identifiers.rootMessageId,
+            reply_message_id ||
+            null,
 
           chatId:
-            chat_id || null,
+            chat_id ||
+            null,
 
           channelId:
-            channel_id || null,
+            channel_id ||
+            null,
 
           objective:
             String(message),
 
           createdBy:
-            user_id || user_email || null,
+            user_id ||
+            user_email ||
+            null,
 
           createdByName:
-            user_name || null,
+            user_name ||
+            null,
         });
 
 
       /**
-       * -----------------------------------------
-       * LOAD OLD HISTORY
-       *
-       * Important:
-       * load history BEFORE saving current message,
-       * otherwise current message would be included twice.
-       * -----------------------------------------
+       * Recent history only.
        */
       const history =
         await getSessionMessages(
+
           session.id,
-          30
+
+          12
         );
 
 
       /**
-       * -----------------------------------------
-       * BUILD REPLY CONTEXT
-       * -----------------------------------------
+       * Reply context.
        */
       const context =
         buildCliqContext({
 
-          messageDetails:
-            message_details || null,
+          replyText:
+            reply_text ||
+            null,
+
+          replySenderName:
+            reply_sender_name ||
+            null,
 
           attachments:
-            attachments || null,
+            attachments ||
+            null,
         });
 
 
       /**
-       * -----------------------------------------
-       * CALL CLAUDE
-       * -----------------------------------------
+       * Ask Claude.
        */
       const result =
         await askClaude({
@@ -316,18 +523,25 @@ app.post(
 
           channelName:
             channel_name ||
+            chat_unique_name ||
             channel_id ||
             chat_id ||
             "Unknown conversation",
 
           context,
+
+          userCountry:
+            user_country ||
+            null,
+
+          userTimezone:
+            user_timezone ||
+            null,
         });
 
 
       /**
-       * -----------------------------------------
-       * SAVE USER MESSAGE
-       * -----------------------------------------
+       * Save user message.
        */
       await addSessionMessage({
 
@@ -338,10 +552,12 @@ app.post(
           "user",
 
         userId:
-          user_id || null,
+          user_id ||
+          null,
 
         userName:
-          user_name || null,
+          user_name ||
+          null,
 
         messageText:
           String(message),
@@ -349,9 +565,7 @@ app.post(
 
 
       /**
-       * -----------------------------------------
-       * SAVE CLAUDE RESPONSE
-       * -----------------------------------------
+       * Save Claude response.
        */
       await addSessionMessage({
 
@@ -369,16 +583,13 @@ app.post(
       });
 
 
-      /**
-       * -----------------------------------------
-       * RESPONSE
-       * -----------------------------------------
-       */
       return res.json({
 
-        success: true,
+        success:
+          true,
 
         response: {
+
           text:
             result.text,
         },
@@ -403,8 +614,17 @@ app.post(
           stop_reason:
             result.stopReason,
 
-            web_search_used:
-         result.webSearchUsed,
+          web_search_used:
+            result.webSearchUsed,
+
+          skill_execution_used:
+            result.skillExecutionUsed,
+
+          attached_skills:
+            result.attachedSkills,
+
+          sources:
+            result.sources,
 
           usage:
             result.usage,
@@ -415,7 +635,7 @@ app.post(
     } catch (error) {
 
       console.error(
-        "Mention handler error:",
+        "Request error:",
         error
       );
 
@@ -424,7 +644,8 @@ app.post(
         .status(500)
         .json({
 
-          success: false,
+          success:
+            false,
 
           error:
             "Claude request failed.",
@@ -438,31 +659,34 @@ app.post(
 
 
 /**
- * ------------------------------------------------
  * 404
- * ------------------------------------------------
  */
-app.use((req, res) => {
+app.use(
+  (
+    req,
+    res
+  ) => {
 
-  return res
-    .status(404)
-    .json({
+    return res
+      .status(404)
+      .json({
 
-      success: false,
+        success:
+          false,
 
-      error:
-        "Route not found",
-    });
-});
+        error:
+          "Route not found",
+      });
+  }
+);
 
 
 /**
- * ------------------------------------------------
- * START APPLICATION
- * ------------------------------------------------
+ * Start.
  */
 const PORT =
-  process.env.PORT || 3000;
+  process.env.PORT ||
+  3000;
 
 
 async function startServer() {
@@ -471,11 +695,38 @@ async function startServer() {
 
     await testDatabaseConnection();
 
+
     await initializeDatabase();
 
 
+    /**
+     * Load Skills once at startup.
+     *
+     * Failure does not prevent server startup.
+     */
+    try {
+
+      const skills =
+        await getAvailableSkills();
+
+
+      console.log(
+        `Startup Skill sync complete: ${skills.length} Skill(s).`
+      );
+
+    } catch (error) {
+
+      console.error(
+        "Initial Skill sync failed:",
+        error.message
+      );
+    }
+
+
     app.listen(
+
       PORT,
+
       "0.0.0.0",
 
       () => {
@@ -485,6 +736,7 @@ async function startServer() {
         );
       }
     );
+
 
   } catch (error) {
 

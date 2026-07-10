@@ -1,37 +1,56 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic from
+  "@anthropic-ai/sdk";
+
 
 import {
   SYSTEM_PROMPT,
 } from "./prompts.js";
 
 
-const client = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+import {
+  getSkillsForClaude,
+} from "./skills.js";
+
+
+const client =
+  new Anthropic({
+
+    apiKey:
+      process.env
+        .ANTHROPIC_API_KEY,
+  });
 
 
 /**
  * ------------------------------------------------
- * ASK CLAUDE WITH:
- *
- * - conversation history
- * - reply context
- * - web search
- * - session continuity
+ * ASK CLAUDE
  * ------------------------------------------------
  */
 export async function askClaude({
+
   message,
+
   history = [],
-  userName = "Team member",
-  channelName = "Unknown conversation",
+
+  userName =
+    "Team member",
+
+  channelName =
+    "Unknown conversation",
+
   context = "",
+
+  userCountry = null,
+
+  userTimezone = null,
+
 }) {
 
   if (
     !message ||
     !String(message).trim()
   ) {
+
     throw new Error(
       "Message is required."
     );
@@ -39,16 +58,17 @@ export async function askClaude({
 
 
   /**
-   * Remove bot mention syntax and internal
-   * Cliq mention tokens.
+   * Clean Cliq command/message.
    */
   const cleanMessage =
-    cleanUserMessage(message);
+    cleanUserMessage(
+      message
+    );
 
 
   /**
-   * Convert PostgreSQL history into
-   * Anthropic message format.
+   * Convert stored PostgreSQL
+   * history to Claude format.
    */
   const claudeHistory =
     convertHistoryToClaudeMessages(
@@ -57,8 +77,38 @@ export async function askClaude({
 
 
   /**
-   * Current request content.
+   * Automatically fetch current
+   * custom Skills.
    */
+  let skills = [];
+
+
+  try {
+
+    skills =
+      await getSkillsForClaude();
+
+
+    console.log(
+      `Attaching ${skills.length} custom Skill(s).`
+    );
+
+  } catch (error) {
+
+    /**
+     * Skill API failure should not
+     * prevent normal Claude usage.
+     */
+    console.error(
+      "Unable to load Skills:",
+      error.message
+    );
+
+
+    skills = [];
+  }
+
+
   const currentContent = `
 USER:
 ${userName}
@@ -69,21 +119,55 @@ ${channelName}
 ADDITIONAL CLIQ CONTEXT:
 ${context}
 
-CURRENT REQUEST:
+CURRENT USER REQUEST:
 ${cleanMessage}
   `.trim();
 
 
-  /**
-   * Build complete Claude conversation.
-   */
   const messages = [
+
     ...claudeHistory,
 
     {
       role: "user",
       content: currentContent,
     },
+  ];
+
+
+  /**
+   * Web search tool.
+   */
+  const webSearchTool =
+    buildWebSearchTool({
+
+      userCountry,
+
+      userTimezone,
+    });
+
+
+  /**
+   * Tools available to Claude.
+   */
+  const tools = [
+
+    /**
+     * Required for Agent Skills.
+     */
+    {
+      type:
+        "code_execution_20260521",
+
+      name:
+        "code_execution",
+    },
+
+
+    /**
+     * Current public information.
+     */
+    webSearchTool,
   ];
 
 
@@ -101,8 +185,8 @@ ${cleanMessage}
 
 
   console.log(
-    "Message count:",
-    messages.length
+    "History message count:",
+    claudeHistory.length
   );
 
 
@@ -112,76 +196,155 @@ ${cleanMessage}
   );
 
 
+  console.log(
+    "Attached Skills:",
+    skills.map(
+      (skill) =>
+        skill.skill_id
+    )
+  );
+
+
   /**
-   * ------------------------------------------------
-   * CLAUDE API CALL
-   *
-   * Web search is available to Claude,
-   * but Claude decides whether it needs it.
-   * ------------------------------------------------
+   * ----------------------------------------------
+   * REQUEST PARAMETERS
+   * ----------------------------------------------
+   */
+  const requestParams = {
+
+    model:
+      "claude-sonnet-5",
+
+    max_tokens:
+      4000,
+
+    betas: [
+      "skills-2025-10-02",
+    ],
+
+    system:
+      SYSTEM_PROMPT,
+
+    messages,
+
+    tools,
+  };
+
+
+  /**
+   * Only include container when
+   * custom Skills actually exist.
+   */
+  if (
+    skills.length > 0
+  ) {
+
+    requestParams.container = {
+
+      skills,
+    };
+  }
+
+
+  /**
+   * ----------------------------------------------
+   * CLAUDE BETA MESSAGES API
+   * ----------------------------------------------
    */
   const response =
-    await client.messages.create({
-
-      model:
-        "claude-sonnet-5",
-
-      max_tokens:
-        4000,
-
-      system:
-        SYSTEM_PROMPT,
-
-      tools: [
-        {
-          type:
-            "web_search_20250305",
-
-          name:
-            "web_search",
-
-          max_uses:
-            5,
-        },
-      ],
-
-      messages,
-    });
+    await client.beta.messages.create(
+      requestParams
+    );
 
 
-  /**
-   * Log stop reason.
-   */
   console.log(
     "Claude stop reason:",
     response.stop_reason
   );
 
 
-  /**
-   * Log all returned content block types.
-   *
-   * Useful because web-search responses may
-   * contain more than plain text blocks.
-   */
   console.log(
-    "Response content types:",
+    "Content block types:",
     response.content.map(
-      (block) => block.type
+      (block) =>
+        block.type
     )
   );
 
 
   /**
-   * Extract final readable text.
+   * Extract text.
    */
-  const text =
+  const answerText =
     extractClaudeText(
       response.content
     );
 
 
-  if (!text) {
+  /**
+   * Extract search sources.
+   */
+  const sources =
+    extractWebSources(
+      response.content
+    );
+
+
+  const webSearchUsed =
+    detectWebSearchUsage(
+
+      response.content,
+
+      response.usage
+    );
+
+
+  const skillExecutionUsed =
+    detectSkillExecution(
+      response.content
+    );
+
+
+  let finalText =
+    answerText;
+
+
+  /**
+   * Add source list for Cliq.
+   */
+  if (
+    sources.length > 0
+  ) {
+
+    const sourceText =
+      sources
+
+        .slice(0, 5)
+
+        .map(
+          (
+            source,
+            index
+          ) => {
+
+            return (
+              `${index + 1}. ${source.title}\n${source.url}`
+            );
+          }
+        )
+
+        .join("\n\n");
+
+
+    finalText +=
+      `\n\nSources:\n${sourceText}`;
+  }
+
+
+  if (
+    !finalText ||
+    !finalText.trim()
+  ) {
 
     console.error(
       "Claude raw response:",
@@ -194,14 +357,17 @@ ${cleanMessage}
 
 
     throw new Error(
-      "Claude returned no readable text response."
+      "Claude returned no readable response."
     );
   }
 
 
   return {
 
-    text,
+    text:
+      sanitizeForCliq(
+        finalText.trim()
+      ),
 
     usage:
       response.usage,
@@ -212,29 +378,95 @@ ${cleanMessage}
     stopReason:
       response.stop_reason,
 
-    /**
-     * Indicates whether web search appeared
-     * in the returned content blocks.
-     */
-    webSearchUsed:
-      detectWebSearchUsage(
-        response.content
+    webSearchUsed,
+
+    skillExecutionUsed,
+
+    attachedSkills:
+      skills.map(
+        (skill) =>
+          skill.skill_id
       ),
+
+    sources,
   };
 }
 
 
 /**
  * ------------------------------------------------
- * CONVERT SESSION HISTORY
+ * WEB SEARCH TOOL
  * ------------------------------------------------
- *
- * PostgreSQL messages:
- *
- * user
- * assistant
- *
- * become Anthropic Messages API messages.
+ */
+function buildWebSearchTool({
+
+  userCountry,
+
+  userTimezone,
+
+}) {
+
+  const tool = {
+
+    type:
+      "web_search_20250305",
+
+    name:
+      "web_search",
+
+    max_uses:
+      5,
+  };
+
+
+  const country =
+    normalizeCountryCode(
+      userCountry
+    );
+
+
+  if (
+    country ||
+    userTimezone
+  ) {
+
+    tool.user_location = {
+
+      type:
+        "approximate",
+    };
+
+
+    if (country) {
+
+      tool.user_location.country =
+        country;
+    }
+
+
+    if (
+      userTimezone &&
+      String(
+        userTimezone
+      ).trim()
+    ) {
+
+      tool.user_location.timezone =
+        String(
+          userTimezone
+        ).trim();
+    }
+  }
+
+
+  return tool;
+}
+
+
+/**
+ * ------------------------------------------------
+ * DATABASE HISTORY → CLAUDE HISTORY
+ * ------------------------------------------------
  */
 function convertHistoryToClaudeMessages(
   history
@@ -243,12 +475,15 @@ function convertHistoryToClaudeMessages(
   const messages = [];
 
 
-  for (const item of history) {
+  for (
+    const item of history
+  ) {
 
     if (
       !item.message_text ||
       !item.role
     ) {
+
       continue;
     }
 
@@ -260,14 +495,13 @@ function convertHistoryToClaudeMessages(
 
 
     let content =
-      String(item.message_text);
+      String(
+        item.message_text
+      );
 
 
     /**
-     * Shared channel sessions may contain
-     * multiple human participants.
-     *
-     * Preserve speaker identity.
+     * Preserve human speaker name.
      */
     if (
       role === "user" &&
@@ -286,8 +520,7 @@ function convertHistoryToClaudeMessages(
 
 
     /**
-     * Merge consecutive messages with
-     * the same role.
+     * Merge consecutive roles.
      */
     if (
       previous &&
@@ -300,7 +533,9 @@ function convertHistoryToClaudeMessages(
     } else {
 
       messages.push({
+
         role,
+
         content,
       });
     }
@@ -313,7 +548,7 @@ function convertHistoryToClaudeMessages(
 
 /**
  * ------------------------------------------------
- * EXTRACT READABLE CLAUDE TEXT
+ * TEXT EXTRACTION
  * ------------------------------------------------
  */
 function extractClaudeText(
@@ -321,49 +556,94 @@ function extractClaudeText(
 ) {
 
   if (
-    !Array.isArray(contentBlocks)
+    !Array.isArray(
+      contentBlocks
+    )
   ) {
+
     return "";
   }
 
 
-  const texts = [];
+  return contentBlocks
 
-
-  for (
-    const block of contentBlocks
-  ) {
-
-    if (
-      block.type === "text" &&
-      block.text
-    ) {
-
-      texts.push(
+    .filter(
+      (block) =>
+        block.type === "text" &&
         block.text
-      );
-    }
-  }
+    )
 
+    .map(
+      (block) =>
+        block.text
+    )
 
-  return texts
     .join("\n\n")
+
     .trim();
 }
 
 
 /**
  * ------------------------------------------------
- * DETECT WEB SEARCH USAGE
+ * WEB SEARCH DETECTION
  * ------------------------------------------------
  */
 function detectWebSearchUsage(
+
+  contentBlocks,
+
+  usage
+
+) {
+
+  if (
+    usage
+      ?.server_tool_use
+      ?.web_search_requests > 0
+  ) {
+
+    return true;
+  }
+
+
+  if (
+    !Array.isArray(
+      contentBlocks
+    )
+  ) {
+
+    return false;
+  }
+
+
+  return contentBlocks.some(
+    (block) =>
+
+      block.type ===
+        "server_tool_use" ||
+
+      block.type ===
+        "web_search_tool_result"
+  );
+}
+
+
+/**
+ * ------------------------------------------------
+ * SKILL / CODE EXECUTION DETECTION
+ * ------------------------------------------------
+ */
+function detectSkillExecution(
   contentBlocks
 ) {
 
   if (
-    !Array.isArray(contentBlocks)
+    !Array.isArray(
+      contentBlocks
+    )
   ) {
+
     return false;
   }
 
@@ -371,12 +651,18 @@ function detectWebSearchUsage(
   return contentBlocks.some(
     (block) => {
 
-      return (
-        block.type ===
-          "server_tool_use" ||
+      const type =
+        block.type || "";
 
-        block.type ===
-          "web_search_tool_result"
+
+      return (
+        type.includes(
+          "code_execution"
+        ) ||
+
+        type.includes(
+          "bash_code_execution"
+        )
       );
     }
   );
@@ -385,7 +671,111 @@ function detectWebSearchUsage(
 
 /**
  * ------------------------------------------------
- * CLEAN USER MESSAGE
+ * SEARCH SOURCES
+ * ------------------------------------------------
+ */
+function extractWebSources(
+  contentBlocks
+) {
+
+  const sources = [];
+
+
+  function walk(value) {
+
+    if (
+      value === null ||
+      value === undefined
+    ) {
+
+      return;
+    }
+
+
+    if (
+      Array.isArray(value)
+    ) {
+
+      for (
+        const item of value
+      ) {
+
+        walk(item);
+      }
+
+
+      return;
+    }
+
+
+    if (
+      typeof value !== "object"
+    ) {
+
+      return;
+    }
+
+
+    if (
+      value.type ===
+        "web_search_result" &&
+      value.url
+    ) {
+
+      sources.push({
+
+        title:
+          value.title ||
+          value.url,
+
+        url:
+          value.url,
+      });
+    }
+
+
+    for (
+      const child of
+        Object.values(value)
+    ) {
+
+      walk(child);
+    }
+  }
+
+
+  walk(contentBlocks);
+
+
+  const seen =
+    new Set();
+
+
+  return sources.filter(
+    (source) => {
+
+      if (
+        seen.has(source.url)
+      ) {
+
+        return false;
+      }
+
+
+      seen.add(
+        source.url
+      );
+
+
+      return true;
+    }
+  );
+}
+
+
+/**
+ * ------------------------------------------------
+ * CLEAN CLIQ INPUT
  * ------------------------------------------------
  */
 function cleanUserMessage(
@@ -394,46 +784,88 @@ function cleanUserMessage(
 
   return String(message)
 
-    /**
-     * XML-like mention.
-     */
     .replace(
       /<@[^>]+>/g,
       " "
     )
 
-    /**
-     * Visible mention.
-     */
     .replace(
       /@Claude\b/gi,
       " "
     )
 
-    /**
-     * Cliq internal bot mention syntax:
-     * {@b-123456}
-     */
     .replace(
       /\{@b-[^}]+\}/g,
       " "
     )
 
-    /**
-     * Plain bot ID.
-     */
     .replace(
       /\bb-[0-9]+\b/g,
       " "
     )
 
-    /**
-     * Normalize whitespace.
-     */
     .replace(
       /\s+/g,
       " "
     )
 
     .trim();
+}
+
+
+/**
+ * ------------------------------------------------
+ * CLIQ OUTPUT SANITIZER
+ * ------------------------------------------------
+ *
+ * Prevent ~ from being interpreted
+ * as Cliq strikethrough syntax.
+ */
+function sanitizeForCliq(
+  text
+) {
+
+  return String(text)
+
+    .replace(
+      /~(?=\d)/g,
+      "approximately "
+    )
+
+    .trim();
+}
+
+
+/**
+ * ------------------------------------------------
+ * COUNTRY NORMALIZATION
+ * ------------------------------------------------
+ */
+function normalizeCountryCode(
+  country
+) {
+
+  if (!country) {
+
+    return null;
+  }
+
+
+  const value =
+    String(country)
+
+      .trim()
+
+      .toUpperCase();
+
+
+  if (
+    /^[A-Z]{2}$/.test(value)
+  ) {
+
+    return value;
+  }
+
+
+  return null;
 }
